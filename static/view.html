@@ -42,7 +42,6 @@
     import * as pdfjsLib from "/static/pdfjs/pdf.min.js";
     pdfjsLib.GlobalWorkerOptions.workerSrc = "/static/pdfjs/pdf.worker.min.js";
 
-    // 키보드 페이지 이동 차단
     window.addEventListener("keydown", (ev) => {
       const keys = ["ArrowLeft","ArrowRight","PageUp","PageDown"," "];
       if(keys.includes(ev.key)) ev.preventDefault();
@@ -66,6 +65,10 @@
     let pdfDoc = null;
     const canvas = document.getElementById("pdfCanvas");
     const ctx = canvas.getContext("2d");
+
+    // ✅ 동시 렌더 방지용
+    let renderTask = null;
+    let renderToken = 0;
 
     function pdfUrl(pdfId){
       return `/static/pdf/pdf${pdfId}.pdf`;
@@ -98,19 +101,35 @@
 
     async function loadAndRender(pdfId, page){
       setError("");
+      const myToken = ++renderToken;
+
       try{
+        if (renderTask) {
+          try { renderTask.cancel(); } catch(e) {}
+          renderTask = null;
+        }
+
         const loadingTask = pdfjsLib.getDocument(pdfUrl(pdfId));
-        pdfDoc = await loadingTask.promise;
+        const newDoc = await loadingTask.promise;
+        if (myToken !== renderToken) return;
+
+        pdfDoc = newDoc;
 
         const p = Math.max(1, Math.min(page, pdfDoc.numPages));
         const pageObj = await pdfDoc.getPage(p);
+        if (myToken !== renderToken) return;
 
         const viewport = pageObj.getViewport({ scale: 1.2 });
         canvas.width = viewport.width;
         canvas.height = viewport.height;
 
-        await pageObj.render({ canvasContext: ctx, viewport }).promise;
-      }catch(e){
+        renderTask = pageObj.render({ canvasContext: ctx, viewport });
+        await renderTask.promise;
+        renderTask = null;
+
+      } catch(e){
+        const msg = e?.name || e?.message || String(e);
+        if (String(msg).includes("RenderingCancelled") || String(msg).includes("cancelled")) return;
         setError("PDF 렌더링 오류:\n" + (e?.message || String(e)));
       }
     }
@@ -138,7 +157,6 @@
         updateStatusLine();
         return;
       }
-
       if(msg.type === "snapshot"){
         controllerId = msg.controller_id;
         currentPdfId = msg.pdf_id;
@@ -148,14 +166,12 @@
         await loadAndRender(currentPdfId, currentPage);
         return;
       }
-
       if(msg.type === "controller_changed"){
         controllerId = msg.controller_id;
         updateControllerUI();
         updateStatusLine();
         return;
       }
-
       if(msg.type === "state_changed"){
         currentPdfId = msg.pdf_id;
         currentPage = msg.page;
@@ -163,7 +179,6 @@
         await loadAndRender(currentPdfId, currentPage);
         return;
       }
-
       if(msg.type === "error"){
         setError(msg.message || "오류");
       }
