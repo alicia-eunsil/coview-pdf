@@ -62,8 +62,7 @@
 import * as pdfjsLib from "/static/pdfjs/pdf.min.js";
 pdfjsLib.GlobalWorkerOptions.workerSrc = "/static/pdfjs/pdf.worker.min.js";
 
-const params = new URLSearchParams(location.search);
-const room = params.get("room") || "GJF00";
+const room = "GJF00";
 roomBadge.textContent = "room: " + room;
 
 const wsUrl = (location.protocol==="https:"?"wss://":"ws://")+location.host+"/ws/"+room;
