@@ -68,9 +68,6 @@
     <canvas id="pdfCanvas"></canvas>
   </div>
 
-  <!-- =========================
-       PDF.js + Viewer Logic
-       ========================= -->
   <script type="module">
     import * as pdfjsLib from "/static/pdfjs/pdf.min.js";
     pdfjsLib.GlobalWorkerOptions.workerSrc = "/static/pdfjs/pdf.worker.min.js";
@@ -103,11 +100,18 @@
 
     let myId = null;
     let controllerId = null;
+
+    // 현재 상태(서버에서 오는 값)
     let currentPdfId = 1;
     let currentPage = 1;
 
     /* -------- PDF Canvas -------- */
     let pdfDoc = null;
+
+    // ✅ 캐싱용: 현재 로드되어 있는 PDF id / 총 페이지
+    let loadedPdfId = null;
+    let totalPages = null;
+
     const canvas = document.getElementById("pdfCanvas");
     const ctx = canvas.getContext("2d");
 
@@ -151,12 +155,13 @@
         ? "없음"
         : (isController() ? "나" : "다른 사람");
 
+      const total = totalPages ? ` / ${totalPages}` : "";
       document.getElementById("statusLine").textContent =
-        `현재: PDF ${currentPdfId} / ${currentPage}p  |  조정자: ${who}`;
+        `현재: PDF ${currentPdfId} | ${currentPage}${total} 페이지  |  조정자: ${who}`;
     }
 
     /* ==================================================
-       ✅ PDF 렌더 (뒤집힘 / 중복 렌더 완전 해결 버전)
+       ✅ PDF 렌더 (캐싱 + 동시 렌더 방지 + iOS 뒤집힘 방지)
        ================================================== */
     async function loadAndRender(pdfId, page){
       setError("");
@@ -169,18 +174,28 @@
           renderTask = null;
         }
 
-        // PDF 로드
-        const loadingTask = pdfjsLib.getDocument(pdfUrl(pdfId));
-        const newDoc = await loadingTask.promise;
-        if (myToken !== renderToken) return;
+        // ✅ PDF 로드는 pdfId가 바뀔 때만 수행(캐싱)
+        if (!pdfDoc || loadedPdfId !== pdfId) {
+          // 로딩 중 표시를 먼저 갱신(총 페이지는 아직 모름)
+          totalPages = null;
+          loadedPdfId = null;
+          updateStatusLine();
 
-        pdfDoc = newDoc;
+          const loadingTask = pdfjsLib.getDocument(pdfUrl(pdfId));
+          const newDoc = await loadingTask.promise;
+          if (myToken !== renderToken) return;
 
+          pdfDoc = newDoc;
+          loadedPdfId = pdfId;
+          totalPages = pdfDoc.numPages;
+        }
+
+        // 여기서부터는 같은 PDF 문서 내 페이지 렌더만 수행
         const p = Math.max(1, Math.min(page, pdfDoc.numPages));
         const pageObj = await pdfDoc.getPage(p);
         if (myToken !== renderToken) return;
 
-        // 🔑 DPR 대응 (iOS/Safari 뒤집힘 방지)
+        // 🔑 DPR 대응 (iOS/Safari 뒤집힘 방지 + 선명도)
         const dpr = window.devicePixelRatio || 1;
         const viewport = pageObj.getViewport({ scale: 1.2 });
 
@@ -201,6 +216,9 @@
 
         await renderTask.promise;
         renderTask = null;
+
+        // ✅ 렌더 성공 후 상태줄 갱신(총페이지 포함)
+        updateStatusLine();
 
       } catch(e){
         const msg = e?.name || e?.message || String(e);
@@ -244,6 +262,7 @@
         controllerId = msg.controller_id;
         currentPdfId = msg.pdf_id;
         currentPage = msg.page;
+
         updateControllerUI();
         updateStatusLine();
         await loadAndRender(currentPdfId, currentPage);
@@ -260,7 +279,8 @@
       if(msg.type === "state_changed"){
         currentPdfId = msg.pdf_id;
         currentPage = msg.page;
-        updateStatusLine();
+
+        updateStatusLine(); // 먼저 숫자 갱신
         await loadAndRender(currentPdfId, currentPage);
         return;
       }
