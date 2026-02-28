@@ -10,11 +10,13 @@
     .badge { padding: 4px 10px; border-radius: 999px; background:#f2f2f2; }
     .badge.on { background:#e6f4ea; }
     .badge.off { background:#fde8e8; }
+    .badge.warn { background:#fff4cc; }
     button { padding: 8px 12px; }
+    button.active { outline: 2px solid #333; }
     #canvasWrap { margin-top: 12px; border: 1px solid #ddd; border-radius: 10px; padding: 10px; }
     #pdfCanvas { width: 100%; height: auto; }
     .hint { color:#666; font-size: 13px; }
-    .error { color:#b00020; font-size: 13px; }
+    .error { color:#b00020; font-size: 13px; white-space: pre-wrap; }
   </style>
 </head>
 <body>
@@ -22,10 +24,11 @@
 
   <div class="topbar">
     <span class="badge" id="roomBadge">room: -</span>
+    <span class="badge warn" id="wsBadge">WS: 연결중...</span>
     <span class="badge" id="controllerBadge">조정권: -</span>
     <button id="btnOn">조정 ON (즉시 takeover)</button>
     <button id="btnOff">조정 OFF (비우기)</button>
-    <span class="hint">※ 조정자가 아니면 페이지/파일 변경 불가(읽기 전용)</span>
+    <span class="hint">※ 조정자가 아니면 변경 불가(읽기 전용)</span>
   </div>
 
   <p class="error" id="err"></p>
@@ -36,21 +39,13 @@
   </div>
 
   <script type="module">
-  import * as pdfjsLib from "/static/pdfjs/pdf.min.js";
+    import * as pdfjsLib from "/static/pdfjs/pdf.min.js";
+    pdfjsLib.GlobalWorkerOptions.workerSrc = "/static/pdfjs/pdf.worker.min.js";
 
-  pdfjsLib.GlobalWorkerOptions.workerSrc =
-    "/static/pdfjs/pdf.worker.min.js";
-
-  window.pdfjsLib = pdfjsLib; // 기존 코드와 연결
-  </script>
-  <script>
-    // ---- prevent local navigation ----
-    // 키보드로 페이지 넘기기(← → PgUp PgDn Space) 같은 걸 막아 "손 안 대고" 보게
+    // 키보드 페이지 이동 차단
     window.addEventListener("keydown", (ev) => {
       const keys = ["ArrowLeft","ArrowRight","PageUp","PageDown"," "];
-      if(keys.includes(ev.key)){
-        ev.preventDefault();
-      }
+      if(keys.includes(ev.key)) ev.preventDefault();
     }, {passive:false});
 
     const params = new URLSearchParams(location.search);
@@ -60,14 +55,14 @@
     const wsUrl = (location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws/" + room;
     const ws = new WebSocket(wsUrl);
 
+    const wsBadge = document.getElementById("wsBadge");
+    const errEl = document.getElementById("err");
+
     let myId = null;
     let controllerId = null;
-
     let currentPdfId = 1;
     let currentPage = 1;
 
-    // pdf.js setup
-    pdfjsLib.GlobalWorkerOptions.workerSrc = "/static/pdfjs/pdf.worker.min.js";
     let pdfDoc = null;
     const canvas = document.getElementById("pdfCanvas");
     const ctx = canvas.getContext("2d");
@@ -75,17 +70,12 @@
     function pdfUrl(pdfId){
       return `/static/pdf/pdf${pdfId}.pdf`;
     }
-
-    function setError(msg){
-      document.getElementById("err").textContent = msg || "";
-    }
-
-    function isController(){
-      return myId && controllerId && myId === controllerId;
-    }
+    function setError(msg){ errEl.textContent = msg || ""; }
+    function isController(){ return myId && controllerId && myId === controllerId; }
 
     function updateControllerUI(){
       const badge = document.getElementById("controllerBadge");
+      const onBtn = document.getElementById("btnOn");
       if(!controllerId){
         badge.textContent = "조정권: 없음";
         badge.className = "badge off";
@@ -96,6 +86,8 @@
         badge.textContent = "조정권: 다른 사람";
         badge.className = "badge off";
       }
+      if (isController()) onBtn.classList.add("active");
+      else onBtn.classList.remove("active");
     }
 
     function updateStatusLine(){
@@ -105,20 +97,24 @@
     }
 
     async function loadAndRender(pdfId, page){
-      const loadingTask = pdfjsLib.getDocument(pdfUrl(pdfId));
-      pdfDoc = await loadingTask.promise;
+      setError("");
+      try{
+        const loadingTask = pdfjsLib.getDocument(pdfUrl(pdfId));
+        pdfDoc = await loadingTask.promise;
 
-      const p = Math.max(1, Math.min(page, pdfDoc.numPages));
-      const pageObj = await pdfDoc.getPage(p);
+        const p = Math.max(1, Math.min(page, pdfDoc.numPages));
+        const pageObj = await pdfDoc.getPage(p);
 
-      const viewport = pageObj.getViewport({ scale: 1.2 });
-      canvas.width = viewport.width;
-      canvas.height = viewport.height;
+        const viewport = pageObj.getViewport({ scale: 1.2 });
+        canvas.width = viewport.width;
+        canvas.height = viewport.height;
 
-      await pageObj.render({ canvasContext: ctx, viewport }).promise;
+        await pageObj.render({ canvasContext: ctx, viewport }).promise;
+      }catch(e){
+        setError("PDF 렌더링 오류:\n" + (e?.message || String(e)));
+      }
     }
 
-    // 조정 ON/OFF (관전자도 조정자로 전환 가능)
     document.getElementById("btnOn").onclick = () => {
       setError("");
       ws.send(JSON.stringify({type:"controller_on"}));
@@ -126,6 +122,11 @@
     document.getElementById("btnOff").onclick = () => {
       setError("");
       ws.send(JSON.stringify({type:"controller_off"}));
+    };
+
+    ws.onopen = () => {
+      wsBadge.textContent = "WS: 연결됨";
+      wsBadge.className = "badge on";
     };
 
     ws.onmessage = async (e) => {
@@ -165,12 +166,20 @@
 
       if(msg.type === "error"){
         setError(msg.message || "오류");
-        return;
       }
     };
 
-    ws.onerror = () => setError("WebSocket 연결 오류");
-    ws.onclose = () => setError("연결이 종료되었습니다.");
+    ws.onerror = () => {
+      wsBadge.textContent = "WS: 오류";
+      wsBadge.className = "badge off";
+      setError("WebSocket 연결 오류(브라우저 콘솔 확인)");
+    };
+
+    ws.onclose = () => {
+      wsBadge.textContent = "WS: 종료됨";
+      wsBadge.className = "badge off";
+      setError("연결이 종료되었습니다(페이지 새로고침 후 재시도).");
+    };
   </script>
 </body>
 </html>
