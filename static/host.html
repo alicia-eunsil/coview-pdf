@@ -58,13 +58,10 @@
     <canvas id="pdfCanvas"></canvas>
   </div>
 
-  <!-- ✅ PDF.js 모듈 + 앱 로직을 한 번에 -->
   <script type="module">
-    // ---- PDF.js (ESM) ----
     import * as pdfjsLib from "/static/pdfjs/pdf.min.js";
     pdfjsLib.GlobalWorkerOptions.workerSrc = "/static/pdfjs/pdf.worker.min.js";
 
-    // ---- room + ws ----
     const params = new URLSearchParams(location.search);
     const room = params.get("room") || "abcd";
     document.getElementById("roomBadge").textContent = "room: " + room;
@@ -81,19 +78,20 @@
     let currentPdfId = 1;
     let currentPage = 1;
 
-    // ---- pdf render ----
     let pdfDoc = null;
     const canvas = document.getElementById("pdfCanvas");
     const ctx = canvas.getContext("2d");
 
+    // ✅ 동시 렌더 방지용
+    let renderTask = null;
+    let renderToken = 0;
+
     function pdfUrl(pdfId){
       return `/static/pdf/pdf${pdfId}.pdf`;
     }
-
     function setError(msg){
       errEl.textContent = msg || "";
     }
-
     function isController(){
       return myId && controllerId && myId === controllerId;
     }
@@ -111,7 +109,6 @@
         badge.textContent = "조정권: 다른 사람";
         badge.className = "badge off";
       }
-      // ON 버튼 눌린 표시(내가 조정자면 active)
       if (isController()) onBtn.classList.add("active");
       else onBtn.classList.remove("active");
     }
@@ -123,19 +120,35 @@
 
     async function loadAndRender(pdfId, page){
       setError("");
+      const myToken = ++renderToken;
+
       try{
+        if (renderTask) {
+          try { renderTask.cancel(); } catch(e) {}
+          renderTask = null;
+        }
+
         const loadingTask = pdfjsLib.getDocument(pdfUrl(pdfId));
-        pdfDoc = await loadingTask.promise;
+        const newDoc = await loadingTask.promise;
+        if (myToken !== renderToken) return;
+
+        pdfDoc = newDoc;
 
         const p = Math.max(1, Math.min(page, pdfDoc.numPages));
         const pageObj = await pdfDoc.getPage(p);
+        if (myToken !== renderToken) return;
 
         const viewport = pageObj.getViewport({ scale: 1.2 });
         canvas.width = viewport.width;
         canvas.height = viewport.height;
 
-        await pageObj.render({ canvasContext: ctx, viewport }).promise;
-      }catch(e){
+        renderTask = pageObj.render({ canvasContext: ctx, viewport });
+        await renderTask.promise;
+        renderTask = null;
+
+      } catch(e){
+        const msg = e?.name || e?.message || String(e);
+        if (String(msg).includes("RenderingCancelled") || String(msg).includes("cancelled")) return;
         setError("PDF 렌더링 오류:\n" + (e?.message || String(e)));
       }
     }
@@ -144,7 +157,6 @@
       ws.send(JSON.stringify({type:"set_state", pdf_id: pdfId, page: page}));
     }
 
-    // ---- controls ----
     document.getElementById("btnOn").onclick = () => {
       setError("");
       ws.send(JSON.stringify({type:"controller_on"}));
@@ -160,28 +172,23 @@
       const page = parseInt(document.getElementById("pageInput").value, 10) || 1;
       sendState(pdfId, page);
     };
-
     document.getElementById("btnPrev").onclick = () => {
       setError("");
       sendState(currentPdfId, Math.max(1, currentPage - 1));
     };
-
     document.getElementById("btnNext").onclick = () => {
       setError("");
       sendState(currentPdfId, currentPage + 1);
     };
-
     document.getElementById("pdfSelect").onchange = () => {
       setError("");
       const pdfId = parseInt(document.getElementById("pdfSelect").value, 10);
       sendState(pdfId, 1);
     };
 
-    // viewer 링크 표시
     document.getElementById("viewerLink").textContent =
       `${location.origin}/view?room=${encodeURIComponent(room)}`;
 
-    // ---- websocket handlers ----
     ws.onopen = () => {
       wsBadge.textContent = "WS: 연결됨";
       wsBadge.className = "badge on";
@@ -195,7 +202,6 @@
         updateControllerUI();
         return;
       }
-
       if(msg.type === "snapshot"){
         controllerId = msg.controller_id;
         currentPdfId = msg.pdf_id;
@@ -205,13 +211,11 @@
         await loadAndRender(currentPdfId, currentPage);
         return;
       }
-
       if(msg.type === "controller_changed"){
         controllerId = msg.controller_id;
         updateControllerUI();
         return;
       }
-
       if(msg.type === "state_changed"){
         currentPdfId = msg.pdf_id;
         currentPage = msg.page;
@@ -219,10 +223,8 @@
         await loadAndRender(currentPdfId, currentPage);
         return;
       }
-
       if(msg.type === "error"){
         setError(msg.message || "오류");
-        return;
       }
     };
 
