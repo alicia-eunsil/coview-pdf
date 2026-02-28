@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>PDF Mirror - Viewer</title>
+  <style>
+    body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; margin: 16px; }
+    .topbar { display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+    .badge { padding: 4px 10px; border-radius: 999px; background:#f2f2f2; }
+    .badge.on { background:#e6f4ea; }
+    .badge.off { background:#fde8e8; }
+    button { padding: 8px 12px; }
+    #canvasWrap { margin-top: 12px; border: 1px solid #ddd; border-radius: 10px; padding: 10px; }
+    #pdfCanvas { width: 100%; height: auto; }
+    .hint { color:#666; font-size: 13px; }
+    .error { color:#b00020; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <h2>PDF Mirror (관전자 화면)</h2>
+
+  <div class="topbar">
+    <span class="badge" id="roomBadge">room: -</span>
+    <span class="badge" id="controllerBadge">조정권: -</span>
+    <button id="btnOn">조정 ON (즉시 takeover)</button>
+    <button id="btnOff">조정 OFF (비우기)</button>
+    <span class="hint">※ 조정자가 아니면 페이지/파일 변경 불가(읽기 전용)</span>
+  </div>
+
+  <p class="error" id="err"></p>
+
+  <div id="canvasWrap">
+    <div class="hint" id="statusLine">로딩 중...</div>
+    <canvas id="pdfCanvas"></canvas>
+  </div>
+
+  <script src="/static/pdfjs/pdf.min.js"></script>
+  <script>
+    // ---- prevent local navigation ----
+    // 키보드로 페이지 넘기기(← → PgUp PgDn Space) 같은 걸 막아 "손 안 대고" 보게
+    window.addEventListener("keydown", (ev) => {
+      const keys = ["ArrowLeft","ArrowRight","PageUp","PageDown"," "];
+      if(keys.includes(ev.key)){
+        ev.preventDefault();
+      }
+    }, {passive:false});
+
+    const params = new URLSearchParams(location.search);
+    const room = params.get("room") || "abcd";
+    document.getElementById("roomBadge").textContent = "room: " + room;
+
+    const wsUrl = (location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws/" + room;
+    const ws = new WebSocket(wsUrl);
+
+    let myId = null;
+    let controllerId = null;
+
+    let currentPdfId = 1;
+    let currentPage = 1;
+
+    // pdf.js setup
+    pdfjsLib.GlobalWorkerOptions.workerSrc = "/static/pdfjs/pdf.worker.min.js";
+    let pdfDoc = null;
+    const canvas = document.getElementById("pdfCanvas");
+    const ctx = canvas.getContext("2d");
+
+    function pdfUrl(pdfId){
+      return `/static/pdf/pdf${pdfId}.pdf`;
+    }
+
+    function setError(msg){
+      document.getElementById("err").textContent = msg || "";
+    }
+
+    function isController(){
+      return myId && controllerId && myId === controllerId;
+    }
+
+    function updateControllerUI(){
+      const badge = document.getElementById("controllerBadge");
+      if(!controllerId){
+        badge.textContent = "조정권: 없음";
+        badge.className = "badge off";
+      } else if (isController()){
+        badge.textContent = "조정권: 나(ON)";
+        badge.className = "badge on";
+      } else {
+        badge.textContent = "조정권: 다른 사람";
+        badge.className = "badge off";
+      }
+    }
+
+    function updateStatusLine(){
+      const who = !controllerId ? "없음" : (isController() ? "나" : "다른 사람");
+      document.getElementById("statusLine").textContent =
+        `현재: PDF ${currentPdfId} / ${currentPage}p  |  조정자: ${who}`;
+    }
+
+    async function loadAndRender(pdfId, page){
+      const loadingTask = pdfjsLib.getDocument(pdfUrl(pdfId));
+      pdfDoc = await loadingTask.promise;
+
+      const p = Math.max(1, Math.min(page, pdfDoc.numPages));
+      const pageObj = await pdfDoc.getPage(p);
+
+      const viewport = pageObj.getViewport({ scale: 1.2 });
+      canvas.width = viewport.width;
+      canvas.height = viewport.height;
+
+      await pageObj.render({ canvasContext: ctx, viewport }).promise;
+    }
+
+    // 조정 ON/OFF (관전자도 조정자로 전환 가능)
+    document.getElementById("btnOn").onclick = () => {
+      setError("");
+      ws.send(JSON.stringify({type:"controller_on"}));
+    };
+    document.getElementById("btnOff").onclick = () => {
+      setError("");
+      ws.send(JSON.stringify({type:"controller_off"}));
+    };
+
+    ws.onmessage = async (e) => {
+      const msg = JSON.parse(e.data);
+
+      if(msg.type === "hello"){
+        myId = msg.client_id;
+        updateControllerUI();
+        updateStatusLine();
+        return;
+      }
+
+      if(msg.type === "snapshot"){
+        controllerId = msg.controller_id;
+        currentPdfId = msg.pdf_id;
+        currentPage = msg.page;
+        updateControllerUI();
+        updateStatusLine();
+        await loadAndRender(currentPdfId, currentPage);
+        return;
+      }
+
+      if(msg.type === "controller_changed"){
+        controllerId = msg.controller_id;
+        updateControllerUI();
+        updateStatusLine();
+        return;
+      }
+
+      if(msg.type === "state_changed"){
+        currentPdfId = msg.pdf_id;
+        currentPage = msg.page;
+        updateStatusLine();
+        await loadAndRender(currentPdfId, currentPage);
+        return;
+      }
+
+      if(msg.type === "error"){
+        setError(msg.message || "오류");
+        return;
+      }
+    };
+
+    ws.onerror = () => setError("WebSocket 연결 오류");
+    ws.onclose = () => setError("연결이 종료되었습니다.");
+  </script>
+</body>
+</html>
