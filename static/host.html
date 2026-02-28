@@ -1,0 +1,216 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>PDF Mirror - Host/Controller</title>
+  <style>
+    body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; margin: 16px; }
+    .topbar { display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+    .badge { padding: 4px 10px; border-radius: 999px; background:#f2f2f2; }
+    .badge.on { background:#e6f4ea; }
+    .badge.off { background:#fde8e8; }
+    .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-top: 10px; }
+    button { padding: 8px 12px; }
+    input, select { padding: 8px 10px; }
+    #viewerLink { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    #canvasWrap { margin-top: 12px; border: 1px solid #ddd; border-radius: 10px; padding: 10px; }
+    #pdfCanvas { width: 100%; height: auto; }
+    .hint { color:#666; font-size: 13px; }
+    .error { color:#b00020; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <h2>PDF Mirror (조정자 화면)</h2>
+
+  <div class="topbar">
+    <span class="badge" id="roomBadge">room: -</span>
+    <span class="badge" id="controllerBadge">조정권: -</span>
+    <button id="btnOn">조정 ON (즉시 takeover)</button>
+    <button id="btnOff">조정 OFF (비우기)</button>
+  </div>
+
+  <div class="row">
+    <label>PDF 선택:</label>
+    <select id="pdfSelect">
+      <option value="1">PDF 1</option>
+      <option value="2">PDF 2</option>
+      <option value="3">PDF 3</option>
+    </select>
+
+    <label>페이지:</label>
+    <input id="pageInput" type="number" min="1" value="1" style="width:90px;" />
+    <button id="btnGo">이동</button>
+    <button id="btnPrev">이전</button>
+    <button id="btnNext">다음</button>
+  </div>
+
+  <p class="hint">
+    관전자 링크: <span id="viewerLink"></span>
+  </p>
+  <p class="error" id="err"></p>
+
+  <div id="canvasWrap">
+    <div class="hint">미리보기(조정자): 현재 선택된 PDF/페이지를 렌더링</div>
+    <canvas id="pdfCanvas"></canvas>
+  </div>
+
+  <script src="/static/pdfjs/pdf.min.js"></script>
+  <script>
+    // ---- room + ws ----
+    const params = new URLSearchParams(location.search);
+    const room = params.get("room") || "abcd";
+    document.getElementById("roomBadge").textContent = "room: " + room;
+
+    const wsUrl = (location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws/" + room;
+    const ws = new WebSocket(wsUrl);
+
+    let myId = null;
+    let controllerId = null;
+
+    // ---- pdf state ----
+    let currentPdfId = 1;
+    let currentPage = 1;
+
+    // ---- pdf.js setup ----
+    // pdfjsLib 전역은 pdf.min.js가 제공
+    pdfjsLib.GlobalWorkerOptions.workerSrc = "/static/pdfjs/pdf.worker.min.js";
+
+    let pdfDoc = null;
+    const canvas = document.getElementById("pdfCanvas");
+    const ctx = canvas.getContext("2d");
+
+    function pdfUrl(pdfId){
+      return `/static/pdf/pdf${pdfId}.pdf`;
+    }
+
+    async function loadAndRender(pdfId, page){
+      const loadingTask = pdfjsLib.getDocument(pdfUrl(pdfId));
+      pdfDoc = await loadingTask.promise;
+
+      const p = Math.max(1, Math.min(page, pdfDoc.numPages));
+      const pageObj = await pdfDoc.getPage(p);
+
+      // 화면에 맞게 적당히 스케일
+      const viewport = pageObj.getViewport({ scale: 1.2 });
+      canvas.width = viewport.width;
+      canvas.height = viewport.height;
+
+      await pageObj.render({ canvasContext: ctx, viewport }).promise;
+    }
+
+    function setError(msg){
+      document.getElementById("err").textContent = msg || "";
+    }
+
+    function isController(){
+      return myId && controllerId && myId === controllerId;
+    }
+
+    function updateControllerUI(){
+      const badge = document.getElementById("controllerBadge");
+      if(!controllerId){
+        badge.textContent = "조정권: 없음";
+        badge.className = "badge off";
+      } else if (isController()){
+        badge.textContent = "조정권: 나(ON)";
+        badge.className = "badge on";
+      } else {
+        badge.textContent = "조정권: 다른 사람";
+        badge.className = "badge off";
+      }
+    }
+
+    function updateInputs(){
+      document.getElementById("pdfSelect").value = String(currentPdfId);
+      document.getElementById("pageInput").value = String(currentPage);
+    }
+
+    function sendState(pdfId, page){
+      ws.send(JSON.stringify({type:"set_state", pdf_id: pdfId, page: page}));
+    }
+
+    // ---- controls ----
+    document.getElementById("btnOn").onclick = () => {
+      setError("");
+      ws.send(JSON.stringify({type:"controller_on"}));
+    };
+    document.getElementById("btnOff").onclick = () => {
+      setError("");
+      ws.send(JSON.stringify({type:"controller_off"}));
+    };
+
+    document.getElementById("btnGo").onclick = () => {
+      setError("");
+      const pdfId = parseInt(document.getElementById("pdfSelect").value, 10);
+      const page = parseInt(document.getElementById("pageInput").value, 10) || 1;
+      sendState(pdfId, page);
+    };
+
+    document.getElementById("btnPrev").onclick = () => {
+      setError("");
+      sendState(currentPdfId, Math.max(1, currentPage - 1));
+    };
+
+    document.getElementById("btnNext").onclick = () => {
+      setError("");
+      sendState(currentPdfId, currentPage + 1);
+    };
+
+    // PDF 선택 바뀌면 조정자가 변경할 수 있게
+    document.getElementById("pdfSelect").onchange = () => {
+      setError("");
+      const pdfId = parseInt(document.getElementById("pdfSelect").value, 10);
+      sendState(pdfId, 1);
+    };
+
+    // viewer 링크 표시
+    const viewerLink = `${location.origin}/view?room=${encodeURIComponent(room)}`;
+    document.getElementById("viewerLink").textContent = viewerLink;
+
+    // ---- websocket handlers ----
+    ws.onmessage = async (e) => {
+      const msg = JSON.parse(e.data);
+
+      if(msg.type === "hello"){
+        myId = msg.client_id;
+        updateControllerUI();
+        return;
+      }
+
+      if(msg.type === "snapshot"){
+        controllerId = msg.controller_id;
+        currentPdfId = msg.pdf_id;
+        currentPage = msg.page;
+        updateControllerUI();
+        updateInputs();
+        await loadAndRender(currentPdfId, currentPage);
+        return;
+      }
+
+      if(msg.type === "controller_changed"){
+        controllerId = msg.controller_id;
+        updateControllerUI();
+        return;
+      }
+
+      if(msg.type === "state_changed"){
+        currentPdfId = msg.pdf_id;
+        currentPage = msg.page;
+        updateInputs();
+        await loadAndRender(currentPdfId, currentPage);
+        return;
+      }
+
+      if(msg.type === "error"){
+        setError(msg.message || "오류");
+        return;
+      }
+    };
+
+    ws.onerror = () => setError("WebSocket 연결 오류");
+    ws.onclose = () => setError("연결이 종료되었습니다.");
+
+  </script>
+</body>
+</html>
