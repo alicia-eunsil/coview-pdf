@@ -3,21 +3,23 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>PDF Mirror - Host/Controller</title>
+  <title>PDF Mirror - Host</title>
   <style>
     body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; margin: 16px; }
     .topbar { display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
     .badge { padding: 4px 10px; border-radius: 999px; background:#f2f2f2; }
     .badge.on { background:#e6f4ea; }
     .badge.off { background:#fde8e8; }
+    .badge.warn { background:#fff4cc; }
     .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-top: 10px; }
     button { padding: 8px 12px; }
+    button.active { outline: 2px solid #333; }
     input, select { padding: 8px 10px; }
     #viewerLink { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
     #canvasWrap { margin-top: 12px; border: 1px solid #ddd; border-radius: 10px; padding: 10px; }
     #pdfCanvas { width: 100%; height: auto; }
     .hint { color:#666; font-size: 13px; }
-    .error { color:#b00020; font-size: 13px; }
+    .error { color:#b00020; font-size: 13px; white-space: pre-wrap; }
   </style>
 </head>
 <body>
@@ -25,6 +27,7 @@
 
   <div class="topbar">
     <span class="badge" id="roomBadge">room: -</span>
+    <span class="badge warn" id="wsBadge">WS: 연결중...</span>
     <span class="badge" id="controllerBadge">조정권: -</span>
     <button id="btnOn">조정 ON (즉시 takeover)</button>
     <button id="btnOff">조정 OFF (비우기)</button>
@@ -55,15 +58,12 @@
     <canvas id="pdfCanvas"></canvas>
   </div>
 
+  <!-- ✅ PDF.js 모듈 + 앱 로직을 한 번에 -->
   <script type="module">
-  import * as pdfjsLib from "/static/pdfjs/pdf.min.js";
+    // ---- PDF.js (ESM) ----
+    import * as pdfjsLib from "/static/pdfjs/pdf.min.js";
+    pdfjsLib.GlobalWorkerOptions.workerSrc = "/static/pdfjs/pdf.worker.min.js";
 
-  pdfjsLib.GlobalWorkerOptions.workerSrc =
-    "/static/pdfjs/pdf.worker.min.js";
-
-  window.pdfjsLib = pdfjsLib; // 기존 코드와 연결
-  </script>
-  <script>
     // ---- room + ws ----
     const params = new URLSearchParams(location.search);
     const room = params.get("room") || "abcd";
@@ -72,17 +72,16 @@
     const wsUrl = (location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws/" + room;
     const ws = new WebSocket(wsUrl);
 
+    const wsBadge = document.getElementById("wsBadge");
+    const errEl = document.getElementById("err");
+
     let myId = null;
     let controllerId = null;
 
-    // ---- pdf state ----
     let currentPdfId = 1;
     let currentPage = 1;
 
-    // ---- pdf.js setup ----
-    // pdfjsLib 전역은 pdf.min.js가 제공
-    pdfjsLib.GlobalWorkerOptions.workerSrc = "/static/pdfjs/pdf.worker.min.js";
-
+    // ---- pdf render ----
     let pdfDoc = null;
     const canvas = document.getElementById("pdfCanvas");
     const ctx = canvas.getContext("2d");
@@ -91,23 +90,8 @@
       return `/static/pdf/pdf${pdfId}.pdf`;
     }
 
-    async function loadAndRender(pdfId, page){
-      const loadingTask = pdfjsLib.getDocument(pdfUrl(pdfId));
-      pdfDoc = await loadingTask.promise;
-
-      const p = Math.max(1, Math.min(page, pdfDoc.numPages));
-      const pageObj = await pdfDoc.getPage(p);
-
-      // 화면에 맞게 적당히 스케일
-      const viewport = pageObj.getViewport({ scale: 1.2 });
-      canvas.width = viewport.width;
-      canvas.height = viewport.height;
-
-      await pageObj.render({ canvasContext: ctx, viewport }).promise;
-    }
-
     function setError(msg){
-      document.getElementById("err").textContent = msg || "";
+      errEl.textContent = msg || "";
     }
 
     function isController(){
@@ -116,6 +100,7 @@
 
     function updateControllerUI(){
       const badge = document.getElementById("controllerBadge");
+      const onBtn = document.getElementById("btnOn");
       if(!controllerId){
         badge.textContent = "조정권: 없음";
         badge.className = "badge off";
@@ -126,11 +111,33 @@
         badge.textContent = "조정권: 다른 사람";
         badge.className = "badge off";
       }
+      // ON 버튼 눌린 표시(내가 조정자면 active)
+      if (isController()) onBtn.classList.add("active");
+      else onBtn.classList.remove("active");
     }
 
     function updateInputs(){
       document.getElementById("pdfSelect").value = String(currentPdfId);
       document.getElementById("pageInput").value = String(currentPage);
+    }
+
+    async function loadAndRender(pdfId, page){
+      setError("");
+      try{
+        const loadingTask = pdfjsLib.getDocument(pdfUrl(pdfId));
+        pdfDoc = await loadingTask.promise;
+
+        const p = Math.max(1, Math.min(page, pdfDoc.numPages));
+        const pageObj = await pdfDoc.getPage(p);
+
+        const viewport = pageObj.getViewport({ scale: 1.2 });
+        canvas.width = viewport.width;
+        canvas.height = viewport.height;
+
+        await pageObj.render({ canvasContext: ctx, viewport }).promise;
+      }catch(e){
+        setError("PDF 렌더링 오류:\n" + (e?.message || String(e)));
+      }
     }
 
     function sendState(pdfId, page){
@@ -164,7 +171,6 @@
       sendState(currentPdfId, currentPage + 1);
     };
 
-    // PDF 선택 바뀌면 조정자가 변경할 수 있게
     document.getElementById("pdfSelect").onchange = () => {
       setError("");
       const pdfId = parseInt(document.getElementById("pdfSelect").value, 10);
@@ -172,10 +178,15 @@
     };
 
     // viewer 링크 표시
-    const viewerLink = `${location.origin}/view?room=${encodeURIComponent(room)}`;
-    document.getElementById("viewerLink").textContent = viewerLink;
+    document.getElementById("viewerLink").textContent =
+      `${location.origin}/view?room=${encodeURIComponent(room)}`;
 
     // ---- websocket handlers ----
+    ws.onopen = () => {
+      wsBadge.textContent = "WS: 연결됨";
+      wsBadge.className = "badge on";
+    };
+
     ws.onmessage = async (e) => {
       const msg = JSON.parse(e.data);
 
@@ -215,9 +226,17 @@
       }
     };
 
-    ws.onerror = () => setError("WebSocket 연결 오류");
-    ws.onclose = () => setError("연결이 종료되었습니다.");
+    ws.onerror = () => {
+      wsBadge.textContent = "WS: 오류";
+      wsBadge.className = "badge off";
+      setError("WebSocket 연결 오류(브라우저 콘솔 확인)");
+    };
 
+    ws.onclose = () => {
+      wsBadge.textContent = "WS: 종료됨";
+      wsBadge.className = "badge off";
+      setError("연결이 종료되었습니다(페이지 새로고침 후 재시도).");
+    };
   </script>
 </body>
 </html>
