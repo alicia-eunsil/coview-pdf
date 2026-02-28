@@ -55,7 +55,14 @@
     <canvas id="pdfCanvas"></canvas>
   </div>
 
-  <script src="/static/pdfjs/pdf.min.js"></script>
+  <script type="module">
+  import * as pdfjsLib from "/static/pdfjs/pdf.min.js";
+
+  pdfjsLib.GlobalWorkerOptions.workerSrc =
+    "/static/pdfjs/pdf.worker.min.js";
+
+  window.pdfjsLib = pdfjsLib; // 기존 코드와 연결
+  </script>
   <script>
     // ---- room + ws ----
     const params = new URLSearchParams(location.search);
