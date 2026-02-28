@@ -6,301 +6,102 @@
   <title>PDF Mirror - Viewer</title>
 
   <style>
-    body {
-      font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-      margin: 16px;
-    }
-    .topbar {
-      display:flex;
-      gap:12px;
-      align-items:center;
-      flex-wrap:wrap;
-      margin-bottom: 10px;
-    }
-    .badge {
-      padding: 4px 10px;
-      border-radius: 999px;
-      background:#f2f2f2;
-      font-size: 13px;
-    }
+    body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; margin:16px; }
+    .topbar { display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+    .badge { padding:4px 10px; border-radius:999px; background:#f2f2f2; font-size:13px; }
     .badge.on { background:#e6f4ea; }
     .badge.off { background:#fde8e8; }
     .badge.warn { background:#fff4cc; }
-
-    button { padding: 8px 12px; }
-    button.active { outline: 2px solid #333; }
-
-    #canvasWrap {
-      margin-top: 12px;
-      border: 1px solid #ddd;
-      border-radius: 10px;
-      padding: 10px;
-    }
-    #pdfCanvas {
-      display: block;
-      max-width: 100%;
-      height: auto;
-    }
-
-    .hint { color:#666; font-size: 13px; }
-    .error { color:#b00020; font-size: 13px; white-space: pre-wrap; }
+    button { padding:8px 12px; }
+    button.active { outline:2px solid #333; }
+    #canvasWrap { margin-top:12px; border:1px solid #ddd; border-radius:10px; padding:10px; }
+    #pdfCanvas { max-width:100%; height:auto; display:block; }
+    .hint { color:#666; font-size:13px; }
+    .error { color:#b00020; font-size:13px; white-space:pre-wrap; }
   </style>
 </head>
 
 <body>
-  <h2>PDF Mirror (Viewer)</h2>
+<h2>PDF Mirror (Viewer)</h2>
 
-  <div class="topbar">
-    <span class="badge" id="roomBadge">room: -</span>
-    <span class="badge warn" id="wsBadge">WS: 연결중...</span>
-    <span class="badge" id="controllerBadge">조정권: -</span>
+<div class="topbar">
+  <span class="badge" id="roomBadge"></span>
+  <span class="badge warn" id="wsBadge">WS: connecting…</span>
+  <span class="badge" id="controllerBadge">Control: -</span>
+  <button id="btnOn">Control ON</button>
+  <button id="btnOff">Control OFF</button>
+</div>
 
-    <button id="btnOn">조정 ON</button>
-    <button id="btnOff">조정 OFF</button>
+<p class="error" id="err"></p>
 
-    <span class="hint">※ 조정자가 아니면 페이지/파일 변경 불가</span>
-  </div>
+<div id="canvasWrap">
+  <div class="hint" id="statusLine">Loading…</div>
+  <canvas id="pdfCanvas"></canvas>
+</div>
 
-  <p class="error" id="err"></p>
+<script type="module">
+import * as pdfjsLib from "/static/pdfjs/pdf.min.js";
+pdfjsLib.GlobalWorkerOptions.workerSrc="/static/pdfjs/pdf.worker.min.js";
 
-  <div id="canvasWrap">
-    <div class="hint" id="statusLine">로딩 중...</div>
-    <canvas id="pdfCanvas"></canvas>
-  </div>
+const params=new URLSearchParams(location.search);
+const room=params.get("room")||"GJF00";
+roomBadge.textContent="room: "+room;
 
-  <script type="module">
-    import * as pdfjsLib from "/static/pdfjs/pdf.min.js";
-    pdfjsLib.GlobalWorkerOptions.workerSrc = "/static/pdfjs/pdf.worker.min.js";
+const wsUrl=(location.protocol==="https:"?"wss://":"ws://")+location.host+"/ws/"+room;
+const ws=new WebSocket(wsUrl);
 
-    /* -------- 키보드 페이지 이동 차단 (관전자 보호) -------- */
-    window.addEventListener(
-      "keydown",
-      (ev) => {
-        const keys = ["ArrowLeft","ArrowRight","PageUp","PageDown"," "];
-        if (keys.includes(ev.key)) ev.preventDefault();
-      },
-      { passive: false }
-    );
+let myId=null, controllerId=null;
+let currentPdfId=1, currentPage=1;
+let pdfDoc=null, loadedPdfId=null, totalPages=null;
 
-    /* -------- Room / WebSocket -------- */
-    const params = new URLSearchParams(location.search);
-    const room = params.get("room") || "GJF00";
-    document.getElementById("roomBadge").textContent = "room: " + room;
+const canvas=pdfCanvas;
+const ctx=canvas.getContext("2d");
+let renderTask=null, renderToken=0;
 
-    const wsUrl =
-      (location.protocol === "https:" ? "wss://" : "ws://") +
-      location.host +
-      "/ws/" +
-      room;
+function pdfUrl(id){ return `/static/pdf/pdf${id}.pdf`; }
+function isController(){ return myId && controllerId===myId; }
+function updateUI(){
+  if(!controllerId){ controllerBadge.textContent="Control: none"; controllerBadge.className="badge off"; }
+  else if(isController()){ controllerBadge.textContent="Control: you"; controllerBadge.className="badge on"; }
+  else{ controllerBadge.textContent="Control: other"; controllerBadge.className="badge off"; }
+  const total=totalPages?` / ${totalPages}`:"";
+  statusLine.textContent=`PDF ${currentPdfId} | ${currentPage}${total} pages`;
+}
 
-    const ws = new WebSocket(wsUrl);
+async function loadAndRender(pdfId,page){
+  const token=++renderToken;
+  if(renderTask){ try{renderTask.cancel();}catch{} }
+  if(!pdfDoc||loadedPdfId!==pdfId){
+    const doc=await pdfjsLib.getDocument(pdfUrl(pdfId)).promise;
+    if(token!==renderToken) return;
+    pdfDoc=doc; loadedPdfId=pdfId; totalPages=doc.numPages;
+  }
+  const p=Math.max(1,Math.min(page,pdfDoc.numPages));
+  const pg=await pdfDoc.getPage(p);
+  const dpr=window.devicePixelRatio||1;
+  const vp=pg.getViewport({scale:1.2});
+  canvas.width=vp.width*dpr; canvas.height=vp.height*dpr;
+  canvas.style.width=`${vp.width}px`; canvas.style.height=`${vp.height}px`;
+  ctx.setTransform(1,0,0,1,0,0); ctx.clearRect(0,0,canvas.width,canvas.height);
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  renderTask=pg.render({canvasContext:ctx,viewport:vp});
+  await renderTask.promise;
+  updateUI();
+}
 
-    const wsBadge = document.getElementById("wsBadge");
-    const errEl = document.getElementById("err");
+btnOn.onclick=()=>ws.send(JSON.stringify({type:"controller_on"}));
+btnOff.onclick=()=>ws.send(JSON.stringify({type:"controller_off"}));
 
-    let myId = null;
-    let controllerId = null;
-
-    // 현재 상태(서버에서 오는 값)
-    let currentPdfId = 1;
-    let currentPage = 1;
-
-    /* -------- PDF Canvas -------- */
-    let pdfDoc = null;
-
-    // ✅ 캐싱용: 현재 로드되어 있는 PDF id / 총 페이지
-    let loadedPdfId = null;
-    let totalPages = null;
-
-    const canvas = document.getElementById("pdfCanvas");
-    const ctx = canvas.getContext("2d");
-
-    // 동시 렌더 방지
-    let renderTask = null;
-    let renderToken = 0;
-
-    function pdfUrl(pdfId){
-      return `/static/pdf/pdf${pdfId}.pdf`;
-    }
-
-    function setError(msg){
-      errEl.textContent = msg || "";
-    }
-
-    function isController(){
-      return myId && controllerId && myId === controllerId;
-    }
-
-    function updateControllerUI(){
-      const badge = document.getElementById("controllerBadge");
-      const onBtn = document.getElementById("btnOn");
-
-      if(!controllerId){
-        badge.textContent = "조정권: 없음";
-        badge.className = "badge off";
-      } else if (isController()){
-        badge.textContent = "조정권: 나(ON)";
-        badge.className = "badge on";
-      } else {
-        badge.textContent = "조정권: 다른 사람";
-        badge.className = "badge off";
-      }
-
-      if (isController()) onBtn.classList.add("active");
-      else onBtn.classList.remove("active");
-    }
-
-    function updateStatusLine(){
-      const who = !controllerId
-        ? "없음"
-        : (isController() ? "나" : "다른 사람");
-
-      const total = totalPages ? ` / ${totalPages}` : "";
-      document.getElementById("statusLine").textContent =
-        `현재: PDF ${currentPdfId} | ${currentPage}${total} 페이지  |  조정자: ${who}`;
-    }
-
-    /* ==================================================
-       ✅ PDF 렌더 (캐싱 + 동시 렌더 방지 + iOS 뒤집힘 방지)
-       ================================================== */
-    async function loadAndRender(pdfId, page){
-      setError("");
-      const myToken = ++renderToken;
-
-      try{
-        // 진행 중 렌더 취소
-        if (renderTask) {
-          try { renderTask.cancel(); } catch(e) {}
-          renderTask = null;
-        }
-
-        // ✅ PDF 로드는 pdfId가 바뀔 때만 수행(캐싱)
-        if (!pdfDoc || loadedPdfId !== pdfId) {
-          // 로딩 중 표시를 먼저 갱신(총 페이지는 아직 모름)
-          totalPages = null;
-          loadedPdfId = null;
-          updateStatusLine();
-
-          const loadingTask = pdfjsLib.getDocument(pdfUrl(pdfId));
-          const newDoc = await loadingTask.promise;
-          if (myToken !== renderToken) return;
-
-          pdfDoc = newDoc;
-          loadedPdfId = pdfId;
-          totalPages = pdfDoc.numPages;
-        }
-
-        // 여기서부터는 같은 PDF 문서 내 페이지 렌더만 수행
-        const p = Math.max(1, Math.min(page, pdfDoc.numPages));
-        const pageObj = await pdfDoc.getPage(p);
-        if (myToken !== renderToken) return;
-
-        // 🔑 DPR 대응 (iOS/Safari 뒤집힘 방지 + 선명도)
-        const dpr = window.devicePixelRatio || 1;
-        const viewport = pageObj.getViewport({ scale: 1.2 });
-
-        canvas.width  = Math.floor(viewport.width  * dpr);
-        canvas.height = Math.floor(viewport.height * dpr);
-        canvas.style.width  = `${Math.floor(viewport.width)}px`;
-        canvas.style.height = `${Math.floor(viewport.height)}px`;
-
-        // 🔑 캔버스 상태 완전 초기화
-        ctx.setTransform(1, 0, 0, 1, 0, 0);
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-
-        renderTask = pageObj.render({
-          canvasContext: ctx,
-          viewport
-        });
-
-        await renderTask.promise;
-        renderTask = null;
-
-        // ✅ 렌더 성공 후 상태줄 갱신(총페이지 포함)
-        updateStatusLine();
-
-      } catch(e){
-        const msg = e?.name || e?.message || String(e);
-        if (
-          String(msg).includes("RenderingCancelled") ||
-          String(msg).includes("cancelled")
-        ) return;
-
-        setError("PDF 렌더링 오류:\n" + (e?.message || String(e)));
-      }
-    }
-
-    /* -------- Buttons -------- */
-    document.getElementById("btnOn").onclick = () => {
-      setError("");
-      ws.send(JSON.stringify({ type: "controller_on" }));
-    };
-
-    document.getElementById("btnOff").onclick = () => {
-      setError("");
-      ws.send(JSON.stringify({ type: "controller_off" }));
-    };
-
-    /* -------- WebSocket Handlers -------- */
-    ws.onopen = () => {
-      wsBadge.textContent = "WS: 연결됨";
-      wsBadge.className = "badge on";
-    };
-
-    ws.onmessage = async (e) => {
-      const msg = JSON.parse(e.data);
-
-      if(msg.type === "hello"){
-        myId = msg.client_id;
-        updateControllerUI();
-        updateStatusLine();
-        return;
-      }
-
-      if(msg.type === "snapshot"){
-        controllerId = msg.controller_id;
-        currentPdfId = msg.pdf_id;
-        currentPage = msg.page;
-
-        updateControllerUI();
-        updateStatusLine();
-        await loadAndRender(currentPdfId, currentPage);
-        return;
-      }
-
-      if(msg.type === "controller_changed"){
-        controllerId = msg.controller_id;
-        updateControllerUI();
-        updateStatusLine();
-        return;
-      }
-
-      if(msg.type === "state_changed"){
-        currentPdfId = msg.pdf_id;
-        currentPage = msg.page;
-
-        updateStatusLine(); // 먼저 숫자 갱신
-        await loadAndRender(currentPdfId, currentPage);
-        return;
-      }
-
-      if(msg.type === "error"){
-        setError(msg.message || "오류");
-      }
-    };
-
-    ws.onerror = () => {
-      wsBadge.textContent = "WS: 오류";
-      wsBadge.className = "badge off";
-      setError("WebSocket 오류 (콘솔 확인)");
-    };
-
-    ws.onclose = () => {
-      wsBadge.textContent = "WS: 종료됨";
-      wsBadge.className = "badge off";
-      setError("연결이 종료되었습니다. 새로고침하세요.");
-    };
-  </script>
+ws.onopen=()=>{ wsBadge.textContent="WS: connected"; wsBadge.className="badge on"; };
+ws.onmessage=async e=>{
+  const m=JSON.parse(e.data);
+  if(m.type==="hello"){ myId=m.client_id; updateUI(); return; }
+  if(m.type==="snapshot"||m.type==="state_changed"){
+    controllerId=m.controller_id ?? controllerId;
+    currentPdfId=m.pdf_id; currentPage=m.page;
+    await loadAndRender(currentPdfId,currentPage);
+  }
+};
+</script>
 </body>
 </html>
